@@ -1,8 +1,8 @@
-# 语音转病例助手 API 服务
+# AIsci 智能病历生成系统 API & SDK
 
 ## 📋 概述
 
-语音转病例助手 API 服务是一个基于 Flask 的 RESTful API 服务，提供语音转录、病例结构化、病历生成等功能，方便小程序和网页应用调用。
+AIsci API 服务是一个基于 FastAPI 的高性能接口服务，提供语音转录、病例结构化、病历生成以及灵犀引擎（LLM）对话功能。它不仅支持 Web/小程序调用，还提供了 Python SDK 方便其他项目直接集成。
 
 ---
 
@@ -18,21 +18,32 @@ pip install -r requirements.txt
 
 **Windows:**
 ```bash
-start_api.bat
-```
-
-**Linux/Mac:**
-```bash
 python api_server.py
 ```
 
-### 3. 测试服务
+服务默认将在 `http://localhost:8000` 启动，你可以访问 `http://localhost:8000/docs` 查看交互式 Swagger 文档。
 
-```bash
-python test_api.py
+---
+
+## 📦 SDK 接入 (Python)
+
+我们提供了 `sdk.py`，只需几行代码即可接入：
+
+```python
+from sdk import AIsciClient
+
+client = AIsciClient(base_url="http://localhost:8000")
+
+# 1. 灵犀引擎对话
+response = client.chat("请分析患者的主诉：头痛伴随恶心")
+print(response['content'])
+
+# 2. 语音转录
+transcript = client.transcribe("path/to/audio.wav")
+
+# 3. 病例结构化
+case_data = client.structure_case(transcript)
 ```
-
-服务将在 `http://localhost:5000` 启动
 
 ---
 
@@ -40,23 +51,20 @@ python test_api.py
 
 ### 基础信息
 
-- **Base URL**: `http://localhost:5000`
-- **Content-Type**: `application/json`
-- **编码**: `UTF-8`
+- **Base URL**: `http://localhost:8000`
+- **Swagger UI**: `/docs`
+- **ReDoc**: `/redoc`
 
-### 接口列表
+### 核心接口列表
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
 | `/health` | GET | 健康检查 |
+| `/api/chat` | POST | **灵犀引擎对话** (新) |
 | `/api/transcribe` | POST | 语音转录 |
 | `/api/structure` | POST | 病例结构化 |
 | `/api/generate` | POST | 病历生成 |
-| `/api/export` | POST | 文档导出 |
-| `/api/case/save` | POST | 保存病例 |
-| `/api/case/<case_id>` | GET | 获取病例 |
-| `/api/cases` | GET | 病例列表 |
-| `/api/case/<case_id>` | DELETE | 删除病例 |
+| `/api/reset` | POST | 重置对话历史 |
 
 ---
 

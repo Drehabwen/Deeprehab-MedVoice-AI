@@ -7,11 +7,11 @@ import tempfile
 from datetime import datetime
 import logging
 
-from core.voice import VoiceRecorder
-from core.nlp_processor import NLPProcessor
-from core.case_structurer import CaseStructurer
-from core.document_generator import DocumentGenerator
-from core.case_manager import CaseManager
+from voice import VoiceRecorder
+from nlp_processor import NLPProcessor
+from case_structurer import CaseStructurer
+from document_generator import DocumentGenerator
+from case_manager import CaseManager
 
 app = Flask(__name__)
 CORS(app)

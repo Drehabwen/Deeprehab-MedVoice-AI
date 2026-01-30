@@ -4,3 +4,4 @@ python-docx
 fpdf2
 flask
 flask-cors
+git@github.com:Drehabwen/Deeprehab-MedVoice-AI.git

@@ -8,18 +8,18 @@ from datetime import datetime
 import sys
 import requests
 import importlib
-from core import nlp_processor
-from core import case_structurer
-from core import voice
-from core import case_manager
-from core import document_generator
-from core import ruiku_manager
+import nlp_processor
+import case_structurer
+import voice
+import case_manager
+import document_generator
+import ruiku_manager
 
-from core.case_manager import CaseManager
-from core.document_generator import DocumentGenerator
-from core.nlp_processor import NLPProcessor
-from core.case_structurer import CaseStructurer
-from core.ruiku_manager import MedicalRuiku
+from case_manager import CaseManager
+from document_generator import DocumentGenerator
+from nlp_processor import NLPProcessor
+from case_structurer import CaseStructurer
+from ruiku_manager import MedicalRuiku
 
 # 设置外观
 ctk.set_appearance_mode("System")

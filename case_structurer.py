@@ -78,7 +78,7 @@ class CaseStructurer:
 ]"""
         
         print(f"DEBUG: 正在发送角色分离请求 (Node 2)...")
-        result = self.nlp.model_base.chat(prompt)
+        result = self.nlp.chat(prompt)
         
         if result["success"]:
             content = result["content"]
@@ -144,7 +144,7 @@ class CaseStructurer:
 不要输出任何其他文字或说明。"""
         
         print("DEBUG: 正在发送病例结构化请求...")
-        result = self.nlp.model_pro.chat(prompt)
+        result = self.nlp.chat(prompt)
         
         if result["success"]:
             content = result["content"]
@@ -216,7 +216,7 @@ class CaseStructurer:
 4. 使用 Markdown 格式。"""
         
         print("DEBUG: 正在生成正式报告...")
-        result = self.nlp.model_pro.chat(prompt)
+        result = self.nlp.chat(prompt)
         if result["success"]:
             return result["content"].strip()
         else:

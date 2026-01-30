@@ -85,8 +85,10 @@ class VoiceToCaseApp(ctk.CTk):
         self.logo_label = ctk.CTkLabel(self.sidebar_frame, text="AI 病历助手", font=ctk.CTkFont(size=20, weight="bold"), text_color=("#2C3E50", "#AED6F1"))
         self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 10))
         
-        self.new_button = ctk.CTkButton(self.sidebar_frame, text="新建病例", command=self.new_case, fg_color="#7FB3D5", hover_color="#5499C7")
-        self.new_button.grid(row=1, column=0, padx=20, pady=10)
+        self.new_button = ctk.CTkButton(self.sidebar_frame, text="+ 新建病例", command=self.new_case, 
+                                       font=ctk.CTkFont(size=15, weight="bold"),
+                                       fg_color="#27AE60", hover_color="#2ECC71", height=40)
+        self.new_button.grid(row=1, column=0, padx=20, pady=(20, 10))
         
         self.open_button = ctk.CTkButton(self.sidebar_frame, text="刷新历史", command=self.refresh_history, fg_color="#82E0AA", hover_color="#58D68D")
         self.open_button.grid(row=2, column=0, padx=20, pady=10)
@@ -420,10 +422,9 @@ class VoiceToCaseApp(ctk.CTk):
                 
                 from nlp_processor import NLPProcessor
                 tester = NLPProcessor(test_cfg)
-                target_model = tester.model_base if config_prefix == "base" else tester.model_pro
-                res = target_model.test_connection()
+                res = tester.test_connection()
                 if res["success"]:
-                    messagebox.showinfo("测试成功", f"连接正常！响应：\n{res['content'][:100]}...")
+                    messagebox.showinfo("测试成功", f"连接正常！响应来自: {res.get('provider', '未知')}\n内容：\n{res['content'][:100]}...")
                 else:
                     messagebox.showerror("测试失败", f"错误：\n{res['error']}")
 
@@ -944,12 +945,41 @@ class VoiceToCaseApp(ctk.CTk):
                             entry.configure(state="disabled")
 
     def new_case(self):
+        """新建病例：清空当前状态并开启新会话"""
+        # 1. 检查是否有未保存的内容
+        has_content = False
+        if self.transcript_text.strip():
+            has_content = True
+        
+        # 检查病例正文是否有内容
+        case_content = self.case_fields["chief_complaint"].get("0.0", "end").strip()
+        if case_content:
+            has_content = True
+            
+        # 2. 如果有内容，弹出确认框
+        if has_content:
+            confirm = messagebox.askyesno("确认新建", "当前病例内容尚未保存，是否确定清空并新建？\n\n这将会清除当前的对话历史和未保存的表单。")
+            if not confirm:
+                return
+
+        # 3. 执行清空操作
+        # 清空转录区
         self.transcript_text_widget.delete("0.0", "end")
         self.transcript_text = ""
+        self.structured_transcript_data = None
         
+        # 清空 AI 引擎历史记录
+        if hasattr(self, "nlp_processor"):
+            self.nlp_processor.reset_history()
+        
+        # 创建新病例 ID 并填充表单
         new_case = self.case_manager.create_new_case("", "男", 30)
         self.populate_case_form(new_case)
         self.current_case = None
+        
+        # 状态提示
+        self.status_label.configure(text="状态：已开启新病例会话")
+        self.announce_status("已开启新病例会话，AI 对话历史已重置")
 
     def open_case(self):
         case_id = self.get_selected_case_id()

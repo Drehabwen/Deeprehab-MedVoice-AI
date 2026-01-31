@@ -2,12 +2,11 @@ const API_BASE = `${window.location.protocol}//${window.location.host}`;
 const WS_BASE = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
 
 // State Management
-let mediaRecorder;
-let audioChunks = [];
+let rec; // Recorder 实例
 let isRecording = false;
 let timerInterval;
 let startTime;
-let socket = null;
+// let socket = null; // 移除旧的 WebSocket 引用
 
 // DOM Elements
 const recordBtn = document.getElementById('record-btn');
@@ -40,85 +39,81 @@ let currentStructuredData = null;
 let currentCaseId = null; // 记录当前正在查看的病例 ID
 let allCases = []; // 存储所有病例用于前端搜索
 
-// --- Recording Logic (Using Backend Local Microphone) ---
+// --- Recording Logic (Using Browser-side Recorder) ---
 
 async function startRecording() {
-    if (socket) {
-        socket.close();
-    }
+    // 检查权限并初始化
+    rec = Recorder({
+        type: "wav",
+        sampleRate: 16000,
+        bitRate: 16,
+        onProcess: function(buffers, powerLevel, bufferDuration, bufferSampleRate) {
+            // 可选：在这里更新波形或音量
+        }
+    });
 
-    try {
-        socket = new WebSocket(`${WS_BASE}/ws/record`);
-        
-        socket.onopen = () => {
-            // 连接建立后，由前端主动发送“开始”指令
-            socket.send(JSON.stringify({ command: "start" }));
-            
-            isRecording = true;
-            updateUI(true);
-            startTimer();
-            transcriptContent.innerText = ""; 
-            console.log('WebSocket 连接成功，已发送 start 指令');
-        };
-
-        socket.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            if (data.status === 'update' && data.text) {
-                transcriptContent.innerText = data.text;
-                // 自动滚动到底部
-                transcriptContent.scrollTop = transcriptContent.scrollHeight;
-            } else if (data.status === 'completed') {
-                transcriptContent.innerText = data.text;
-                recordStatus.innerText = "转录完成";
-                showToast("录音已完成，正在自动进行结构化分析...");
-                // 录音完成后自动触发结构化分析
-                handleStructure();
-            }
-        };
-
-        socket.onclose = () => {
-            console.log('WebSocket 已关闭');
-            if (isRecording) {
-                stopRecording();
-            }
-        };
-
-        socket.onerror = (err) => {
-            console.error('WebSocket 错误:', err);
-            showToast("实时转录连接失败", "error");
-        };
-
-    } catch (err) {
-        console.error('无法启动实时录音:', err);
-        showToast("无法访问实时录音接口", "error");
-    }
+    rec.open(function() {
+        rec.start();
+        isRecording = true;
+        updateUI(true);
+        startTimer();
+        transcriptContent.innerText = "正在聆听并录制...";
+        console.log('浏览器录音已启动');
+    }, function(msg, isUserNotAllow) {
+        showToast((isUserNotAllow ? "用户拒绝了麦克风权限" : "无法开启录音：" + msg), "error");
+    });
 }
 
 async function stopRecording() {
-    if (!isRecording) return;
+    if (!isRecording || !rec) return;
     
     isRecording = false;
     updateUI(false);
     stopTimer();
     
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        // 主动发送停止指令
-        socket.send(JSON.stringify({ command: "stop" }));
-        // 延迟一小会儿关闭，确保后端收到指令
-        setTimeout(() => {
-            if (socket) {
-                socket.close();
-                socket = null;
+    recordStatus.innerText = "正在转录...";
+    showToast("正在处理录音文件...");
+
+    rec.stop(async function(blob, duration) {
+        // 1. 将 Blob 转换为 Base64
+        const reader = new FileReader();
+        reader.onloadend = async function() {
+            const base64Data = reader.result.split(',')[1];
+            
+            // 2. 发送到后端转录接口
+            try {
+                const response = await fetch(`${API_BASE}/api/transcribe`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        audio_data: base64Data,
+                        format: "wav"
+                    })
+                });
+                
+                const result = await response.json();
+                if (result.status === 'success') {
+                    transcriptContent.innerText = result.data.transcript;
+                    recordStatus.innerText = "转录完成";
+                    showToast("转录成功，正在结构化分析...");
+                    handleStructure();
+                } else {
+                    showToast("转录失败: " + result.message, "error");
+                    recordStatus.innerText = "转录失败";
+                }
+            } catch (err) {
+                showToast("请求后端转录失败", "error");
+                recordStatus.innerText = "连接错误";
             }
-        }, 100);
-    } else if (socket) {
-        socket.close();
-        socket = null;
-    }
-    
-    recordStatus.innerText = "转录完成";
-    structureBtn.disabled = false;
-    showToast("录音已停止");
+        };
+        reader.readAsDataURL(blob);
+        
+        // 释放资源
+        rec.close();
+        rec = null;
+    }, function(msg) {
+        showToast("录音停止失败：" + msg, "error");
+    });
 }
 
 // --- Analysis Logic ---

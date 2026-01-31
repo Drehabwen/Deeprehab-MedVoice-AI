@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  aisci-app:
+    build: .
+    container_name: aisci-server
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./cases:/app/cases
+      - ./exports:/app/exports
+      - ./config.json:/app/config.json
+    environment:
+      - TZ=Asia/Shanghai
+    restart: always
+
+# 如果需要 Nginx 配合，可以在此继续添加 nginx 服务

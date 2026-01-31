@@ -34,184 +34,70 @@ class CaseStructurer:
             
         return json_str
 
-    def analyze_dialogue(self, input_data):
+    def analyze_and_structure(self, input_data):
         """
-        第一步：角色分离节点 (Node 2)
-        任务：仅将原始文本或初步转录内容整理为清晰的 [角色]: [对话内容] 格式列表
+        合并步骤：一键完成角色分析与病历结构化
         """
         if not input_data:
-            return []
+            return [], {}
             
-        if isinstance(input_data, list):
-            # 如果已经是列表，说明 ASR 已经尝试过角色分离，此时 AI 仅负责校验和格式统一
-            prompt = f"""你是一位医疗对话整理助手。请对以下初步分好角色的对话进行深度校验与优化：
+        prompt = f"""你是一位极其专业的全科医生和医疗速记员。请根据以下原始转录文本，完成对话还原与病历结构化。
 
-【优化任务】
-1. **逻辑校验**：根据语境判断“医生”和“患者”的标签是否分配准确，修正归属错误。
-2. **文本精简**：合并同一人连续的、语义碎片化的对话；去除冗余的语气词。
-3. **格式规范**：确保输出为干净的 JSON 数组，无多余层级。
+【第一部分：对话还原要求】
+1. **角色标注**：识别说话人：[医生]、[患者]、[家属]。
+2. **术语修正**：修正医疗词汇错误（如“血压高”->“高血压”）。
+3. **内容提炼**：去除口癖，保持逻辑连贯。
 
-【初步对话数据】
-{json.dumps(input_data, ensure_ascii=False, indent=2)}
+【第二部分：病历结构化要求】
+提取以下标准字段：
+- 主诉：最主要原因及持续时间。
+- 现病史：疾病发生、演变过程。
+- 既往史：健康状况、过敏史等。
+- 体格检查：提到的检查结果（血压、心率等）。
+- 诊断建议：初步诊断意见。
+- 处理意见：用药或检查计划。
 
-【输出要求】
-仅输出 JSON，不要有任何其他解释。格式：[{{"speaker": "医生", "text": "内容"}}, ...]"""
-        else:
-            # 如果是原始文本字符串
-            prompt = f"""你是一位资深的医疗对话整理助手。请将以下原始语音转录文本精准地整理为“医生”和“患者”之间的对话列表。
-
-【任务目标】
-1. **角色识别**：根据语气、内容和医学逻辑，准确识别说话人（医生/患者）。
-2. **文本清洗**：去除重复的字词、无意义的口癖（如：啊、那个、就是、嗯）。
-3. **断句合并**：将属于同一个人的连续陈述合并为完整的段落。
-4. **保持原意**：不要删减核心医疗信息，保留口语中的关键细节。
-
-【原始文本】
+【原始转录】
 {input_data}
 
-【输出格式】
-必须输出标准的 JSON 数组格式，禁止任何开场白 or 解释。
-格式示例：
-[
-  {{"speaker": "医生", "text": "内容"}},
-  {{"speaker": "患者", "text": "内容"}}
-]"""
+【输出格式要求】
+必须输出标准的 JSON 对象，包含两个字段：
+1. "analyzed_dialogue": 角色对话列表，格式为 [{{"speaker": "角色", "text": "内容"}}]。
+2. "structured_case": 结构化病历对象，包含：主诉、现病史、既往史、体格检查、诊断建议、处理意见。
+
+禁止任何开场白或解释。"""
         
-        print(f"DEBUG: 正在发送角色分离请求 (Node 2)...")
-        result = self.nlp.model_base.chat(prompt)
-        
-        if result["success"]:
-            content = result["content"]
-            try:
-                json_str = self._clean_json_content(content, is_list=True)
-                return json.loads(json_str)
-            except Exception as e:
-                print(f"DEBUG: 角色分离解析失败: {e}, 原始内容: {content[:100]}...")
-                # 终极降级：如果 JSON 彻底失败，但内容包含对话特征，尝试按行简单分割
-                if isinstance(input_data, str) and ("医生" in content or "患者" in content):
-                    lines = content.strip().split('\n')
-                    fallback_list = []
-                    for line in lines:
-                        if "：" in line or ":" in line:
-                            parts = line.replace(":", "：").split("：", 1)
-                            fallback_list.append({"speaker": parts[0].strip(), "text": parts[1].strip()})
-                    if fallback_list: return fallback_list
-                
-                if isinstance(input_data, str):
-                    return [{"speaker": "系统", "text": input_data}]
-                return input_data
-        else:
-            print(f"DEBUG: 角色分离请求失败: {result.get('error')}")
-            if isinstance(input_data, str):
-                return [{"speaker": "系统", "text": input_data}]
-            return input_data if isinstance(input_data, list) else []
-
-    def structure(self, speaker_dialogues):
-        """
-        第二步：将对话转化为结构化数据、规范病例正文以及 AI 临床建议
-        """
-        dialogue_text = ""
-        for item in speaker_dialogues:
-            dialogue_text += f"{item.get('speaker', '未知')}: {item.get('text', '')}\n"
-
-        prompt = f"""你是一位资深的医疗病历书写专家与临床顾问。请根据以下医患对话，完成以下任务：
-1. 提取患者基本信息（姓名、性别、年龄）。
-2. 将对话内容结构化为标准的病例要素（主诉、现病史、既往史、体格检查、诊断、处理意见）。
-3. 撰写一份符合医学文书规范的标准化病例 (Markdown 格式)。
-4. 提供基于该对话的“AI 临床建议”（包括可能的诊断方向、检查建议或治疗提醒）。
-
-【对话内容】
-{dialogue_text}
-
-【病例撰写要求】
-- 语言要专业、精炼，符合病历书写规范。
-- 如果某项内容在对话中未涉及，请标注为“未见异常”或“未诉”。
-- 使用 Markdown 格式排版。
-
-【AI 建议要求】
-- 基于对话内容给出专业的临床辅助建议。
-- 必须注明“该建议由 AI 生成，仅供医生参考”。
-
-【输出要求】
-必须直接输出一个 JSON 对象，包含以下字段，禁止任何开场白或解释：
-{{
-  "patient_name": "姓名",
-  "gender": "男/女",
-  "age": "年龄数字",
-  "主诉": "患者最主要的症状和持续时间",
-  "现病史": "症状的发生、发展、演变过程及伴随症状",
-  "既往史": "既往健康状况、曾患疾病、手术史、过敏史等",
-  "体格检查": "体温、脉搏、呼吸、血压及专科检查情况",
-  "诊断": "初步诊断结论",
-  "处理意见": "后续检查、治疗、用药及随访建议",
-  "markdown_content": "完整的 Markdown 格式病例正文",
-  "ai_suggestions": "AI 临床建议内容（包含来源说明）"
-}}"""
-        
-        print("DEBUG: 正在发送病例结构化请求...")
+        print(f"DEBUG: 正在进行一键式 AI 角色分析与病历结构化...")
         result = self.nlp.model_pro.chat(prompt)
         
         if result["success"]:
             content = result["content"]
             try:
                 json_str = self._clean_json_content(content, is_list=False)
-                return json.loads(json_str)
+                data = json.loads(json_str)
+                return data.get("analyzed_dialogue", []), data.get("structured_case", {})
             except Exception as e:
-                print(f"DEBUG: 病例结构化 JSON 解析失败: {e}, 响应内容: {content[:100]}...")
-                
-                # 启发式提取：即使 JSON 失败，如果内容看起来像 Markdown，尝试从中提取
-                extracted_data = {
-                    "patient_name": "",
-                    "gender": "男",
-                    "age": "",
-                    "主诉": "",
-                    "现病史": "",
-                    "既往史": "",
-                    "体格检查": "",
-                    "诊断": "",
-                    "处理意见": "",
-                    "markdown_content": content,
-                    "ai_suggestions": ""
-                }
-                
-                # 简单正则提取姓名、年龄
-                import re
-                name_match = re.search(r"姓名[：:]\s*([^\n\s,，]+)", content)
-                if name_match: extracted_data["patient_name"] = name_match.group(1)
-                
-                age_match = re.search(r"年龄[：:]\s*(\d+)", content)
-                if age_match: extracted_data["age"] = age_match.group(1)
-                
-                gender_match = re.search(r"性别[：:]\s*(男|女)", content)
-                if gender_match: extracted_data["gender"] = gender_match.group(1)
-                
-                if "建议" in content:
-                    # 优先匹配 AI 建议
-                    ai_match = re.search(r"(?:AI\s*建议|AI\s*临床建议)[：:]\s*([\s\S]+)", content)
-                    if ai_match:
-                        extracted_data["ai_suggestions"] = ai_match.group(1).strip()
-                    else:
-                        # 退而求其次
-                        parts = re.split(r"建议[：:]", content, maxsplit=1)
-                        if len(parts) > 1:
-                            extracted_data["ai_suggestions"] = parts[1].strip()
-                        
-                return extracted_data
-        else:
-            print(f"DEBUG: 病例结构化请求失败: {result.get('error', '未知错误')}")
-            return {
-                "patient_name": "",
-                "gender": "男",
-                "age": "",
-                "主诉": "提取失败",
-                "现病史": "提取失败",
-                "既往史": "提取失败",
-                "体格检查": "提取失败",
-                "诊断": "提取失败",
-                "处理意见": "提取失败",
-                "markdown_content": f"AI 结构化失败: {result.get('error', '未知错误')}\n\n请尝试手动填写或重新生成。",
-                "ai_suggestions": ""
-            }
+                print(f"DEBUG: 综合分析解析失败: {e}")
+                return [], {}
+        return [], {}
+
+    def analyze_dialogue(self, input_data):
+        """
+        保留旧接口以兼容测试，底层调用新合并逻辑
+        """
+        dialogue, _ = self.analyze_and_structure(input_data)
+        return dialogue
+
+    def structure(self, dialogue_list):
+        """
+        保留旧接口以兼容测试，由于合并逻辑需要原始文本，此接口单独调用时会较慢
+        """
+        # 如果传入的是列表，说明是旧流程调用
+        if isinstance(dialogue_list, list):
+            dialogue_text = "\n".join([f"{d['speaker']}: {d['text']}" for d in dialogue_list])
+            _, structured = self.analyze_and_structure(dialogue_text)
+            return structured
+        return {}
 
     def generate_report(self, case_data, config):
         """

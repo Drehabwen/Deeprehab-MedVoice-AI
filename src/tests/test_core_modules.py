@@ -4,11 +4,12 @@ import os
 import sys
 from unittest.mock import Mock, patch, MagicMock
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# 确保 src 目录在 Python 路径中，以便能够导入核心模块
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from case_structurer import CaseStructurer
-from case_manager import CaseManager
-from document_generator import DocumentGenerator
+from core.case_structurer import CaseStructurer
+from core.case_manager import CaseManager
+from core.document_generator import DocumentGenerator
 
 
 class TestCaseStructurer(unittest.TestCase):
@@ -17,39 +18,59 @@ class TestCaseStructurer(unittest.TestCase):
         self.structurer = CaseStructurer(self.mock_nlp)
 
     def test_analyze_dialogue_success(self):
-        # 模拟模型响应
-        self.mock_nlp.model_base.chat.return_value = {
-            "success": True,
-            "content": '[{"speaker": "医生", "text": "你好"}, {"speaker": "患者", "text": "头痛"}]'
-        }
-        
-        result = self.structurer.analyze_dialogue("医生说你好患者说头痛")
-        
-        self.assertEqual(len(result), 2)
-        self.assertEqual(result[0]["speaker"], "医生")
-        self.assertEqual(result[1]["text"], "头痛")
-
-    def test_structure_success(self):
-        # 模拟模型响应
-        expected_json = {
-            "patient_name": "张三",
-            "gender": "男",
-            "age": "45",
-            "markdown_content": "# 病例正文\n主诉：头痛",
-            "ai_suggestions": "建议检查头颅CT"
+        # 模拟模型响应 (符合新合并格式)
+        mock_response = {
+            "analyzed_dialogue": [
+                {"speaker": "医生", "text": "你好，哪里不舒服？"},
+                {"speaker": "患者", "text": "我最近血压有点高"}
+            ],
+            "structured_case": {
+                "主诉": "血压高",
+                "现病史": "最近血压高",
+                "既往史": "无",
+                "体格检查": "未提",
+                "诊断建议": "高血压",
+                "处理意见": "建议检查"
+            }
         }
         self.mock_nlp.model_pro.chat.return_value = {
             "success": True,
-            "content": json.dumps(expected_json)
+            "content": json.dumps(mock_response)
         }
         
-        dialogues = [{"speaker": "医生", "text": "你好"}, {"speaker": "患者", "text": "头痛"}]
+        result = self.structurer.analyze_dialogue("医生说你好哪里不舒服患者说我最近血压有点高")
+        
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["speaker"], "医生")
+        self.assertEqual(result[1]["speaker"], "患者")
+        self.assertIn("血压", result[1]["text"])
+
+    def test_structure_success(self):
+        # 模拟模型响应 (符合新合并格式)
+        mock_response = {
+            "analyzed_dialogue": [],
+            "structured_case": {
+                "主诉": "头痛3天",
+                "现病史": "患者3天前无明显诱因出现头痛",
+                "既往史": "无",
+                "体格检查": "血压140/90mmHg",
+                "诊断建议": "高血压待查",
+                "处理意见": "完善头颅CT检查"
+            }
+        }
+        
+        self.mock_nlp.model_pro.chat.return_value = {
+            "success": True,
+            "content": json.dumps(mock_response)
+        }
+        
+        # 注意：这里传入对话列表时，底层会先合并为文本再重新分析
+        dialogues = [{"speaker": "医生", "text": "你好"}, {"speaker": "患者", "text": "我头痛3天了"}]
         result = self.structurer.structure(dialogues)
         
-        self.assertEqual(result["patient_name"], "张三")
-        self.assertEqual(result["gender"], "男")
-        self.assertIn("病例正文", result["markdown_content"])
-        self.assertEqual(result["ai_suggestions"], "建议检查头颅CT")
+        self.assertEqual(result["主诉"], "头痛3天")
+        self.assertEqual(result["诊断建议"], "高血压待查")
+        self.assertIn("完善头颅CT", result["处理意见"])
 
     def test_generate_report_success(self):
         self.mock_nlp.model_pro.chat.return_value = {
@@ -253,17 +274,24 @@ class TestIntegration(unittest.TestCase):
             shutil.rmtree("./test_exports")
 
     def test_full_workflow(self):
-        # 1. 模拟 AI 结构化响应
-        expected_json = {
-            "patient_name": "张三",
-            "gender": "男",
-            "age": "45",
-            "markdown_content": "# 病例正文\n主诉：头痛3天",
-            "ai_suggestions": "AI 建议内容"
+        # 1. 模拟 AI 结构化响应 (符合新合并格式)
+        mock_response = {
+            "analyzed_dialogue": [{"speaker": "医生", "text": "你好"}, {"speaker": "患者", "text": "头痛"}],
+            "structured_case": {
+                "patient_name": "张三",
+                "gender": "男",
+                "age": "45",
+                "主诉": "头痛3天",
+                "现病史": "最近头痛",
+                "既往史": "无",
+                "体格检查": "无",
+                "诊断建议": "高血压",
+                "处理意见": "AI 建议内容"
+            }
         }
         self.mock_nlp.model_pro.chat.return_value = {
             "success": True,
-            "content": json.dumps(expected_json)
+            "content": json.dumps(mock_response)
         }
         
         dialogues = [{"speaker": "医生", "text": "你好"}, {"speaker": "患者", "text": "头痛"}]
@@ -275,6 +303,9 @@ class TestIntegration(unittest.TestCase):
         # 添加一些必要字段
         structured_case["case_id"] = "TEST_ID"
         structured_case["diagnosis"] = "高血压"
+        # 补全 CaseManager 验证需要的字段
+        structured_case["chief_complaint"] = structured_case["主诉"]
+        
         success, result = self.case_manager.save_case(structured_case)
         self.assertTrue(success)
         

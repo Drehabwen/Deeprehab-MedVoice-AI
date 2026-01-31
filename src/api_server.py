@@ -15,13 +15,13 @@ import uvicorn
 
 # 导入核心模块
 try:
-    from core.voice import VoiceRecorder
+    from core.voice import VoiceRecorder, VoiceRecognizer
     from core.nlp_processor import NLPProcessor
     from core.case_structurer import CaseStructurer
     from core.document_generator import DocumentGenerator
     from core.case_manager import CaseManager
 except ImportError:
-    from voice import VoiceRecorder
+    from voice import VoiceRecorder, VoiceRecognizer
     from nlp_processor import NLPProcessor
     from case_structurer import CaseStructurer
     from document_generator import DocumentGenerator
@@ -143,15 +143,19 @@ async def stop_local_record():
 
 @app.post("/api/transcribe")
 async def transcribe_audio(request: TranscribeRequest):
+    logger.info(f"收到转录请求，格式: {request.format}, 数据大小: {len(request.audio_data)}")
     try:
         audio_bytes = base64.b64decode(request.audio_data)
+        logger.info(f"Base64解码成功，字节数: {len(audio_bytes)}")
         
         with tempfile.NamedTemporaryFile(suffix=f'.{request.format}', delete=False) as temp_file:
             temp_file.write(audio_bytes)
             temp_file_path = temp_file.name
         
+        logger.info(f"临时文件已创建: {temp_file_path}")
         try:
             transcript = recorder.transcribe_file(temp_file_path)
+            logger.info(f"转录完成，结果长度: {len(transcript) if transcript else 0}")
             return {
                 'status': 'success',
                 'data': {
@@ -165,15 +169,18 @@ async def transcribe_audio(request: TranscribeRequest):
     
     except Exception as e:
         logger.error(f'转录失败: {str(e)}')
-        raise HTTPException(status_code=500, detail=f'转录失败: {str(e)}')
+        # 返回更详细的错误信息
+        return {
+            'status': 'error',
+            'message': str(e),
+            'detail': str(e)
+        }
 
 @app.post("/api/structure")
 async def structure_case(request: StructureRequest):
     try:
-        # 步骤 1: 分析对话
-        analyzed_dialogue = case_structurer.analyze_dialogue(request.transcript)
-        # 步骤 2: 结构化病历
-        structured_case = case_structurer.structure(analyzed_dialogue)
+        # 使用合并后的方法，大幅提升速度
+        analyzed_dialogue, structured_case = case_structurer.analyze_and_structure(request.transcript)
         
         return {
             'status': 'success',
@@ -276,6 +283,93 @@ async def save_case_data(request: SaveRequest):
     except Exception as e:
         logger.error(f'保存失败: {str(e)}')
         raise HTTPException(status_code=500, detail=f'保存失败: {str(e)}')
+
+@app.websocket("/ws/stream_transcribe")
+async def websocket_stream_transcribe(websocket: WebSocket):
+    await websocket.accept()
+    logger.info("收到前端流式转录 WebSocket 连接")
+    
+    # 准备 ASR
+    asr = VoiceRecognizer(config)
+    loop = asyncio.get_running_loop()
+    result_queue = asyncio.Queue()
+    
+    def on_update(text):
+        loop.call_soon_threadsafe(result_queue.put_nowait, {"type": "update", "text": text})
+        
+    def on_complete(text):
+        loop.call_soon_threadsafe(result_queue.put_nowait, {"type": "complete", "text": text})
+        
+    def on_error(error):
+        loop.call_soon_threadsafe(result_queue.put_nowait, {"type": "error", "message": str(error)})
+
+    # 启动 ASR (后台运行，禁用本地麦克风)
+    asr.start(on_update=on_update, on_complete=on_complete, on_error=on_error, use_pyaudio=False)
+    
+    # 并发处理：发送结果和接收音频
+    async def send_results():
+        try:
+            while True:
+                res = await result_queue.get()
+                if res["type"] == "update":
+                    await websocket.send_json({"status": "update", "text": res["text"]})
+                elif res["type"] == "complete":
+                    await websocket.send_json({"status": "complete", "text": res["text"]})
+                elif res["type"] == "error":
+                    await websocket.send_json({"status": "error", "message": res["message"]})
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"发送流式结果失败: {e}")
+
+    send_task = asyncio.create_task(send_results())
+    
+    try:
+        total_bytes = 0
+        last_log_time = asyncio.get_event_loop().time()
+        
+        while True:
+            # 接收前端发送的二进制音频切片或控制指令
+            message = await websocket.receive()
+            
+            if "bytes" in message:
+                audio_chunk = message["bytes"]
+                # 数据质量校验：检查是否全为 0 (静音或采集失败)
+                if len(audio_chunk) > 0:
+                    # 检查音量大小
+                    import numpy as np
+                    audio_data = np.frombuffer(audio_chunk, dtype=np.int16)
+                    peak = np.abs(audio_data).max() if len(audio_data) > 0 else 0
+                    
+                    if peak > 0:
+                        total_bytes += len(audio_chunk)
+                        asr.push_audio(audio_chunk)
+                        
+                        # 如果音量太小，记录警告
+                        if peak < 500: # 经验值：太小可能导致转写错误
+                             if asyncio.get_event_loop().time() - last_log_time >= 5.0:
+                                 logger.warning(f"音频信号微弱 (Peak: {peak})，可能导致转写不准或出现英文")
+                    else:
+                        if asyncio.get_event_loop().time() - last_log_time >= 5.0:
+                             logger.warning("接收到纯静音数据，请检查麦克风权限或设备")
+            elif "text" in message:
+                data = json.loads(message["text"])
+                if data.get("command") == "stop":
+                    logger.info("收到前端停止指令，正在结束 ASR 任务...")
+                    asr.stop()
+                    break
+    except WebSocketDisconnect:
+        logger.info("前端 WebSocket 已断开，清理资源...")
+        asr.stop()
+    except Exception as e:
+        logger.error(f"流式转录链路异常: {e}", exc_info=True)
+        asr.stop()
+        try:
+            await websocket.send_json({"status": "error", "message": f"链路故障: {str(e)}"})
+        except: pass
+    finally:
+        send_task.cancel()
+        logger.info("流式转录流程结束")
 
 @app.get("/api/cases")
 async def get_cases():

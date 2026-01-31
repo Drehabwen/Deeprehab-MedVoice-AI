@@ -4,9 +4,10 @@ const WS_BASE = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${wi
 // State Management
 let rec; // Recorder 实例
 let isRecording = false;
+let streamSocket = null;
 let timerInterval;
 let startTime;
-// let socket = null; // 移除旧的 WebSocket 引用
+let lastProcessIndex = 0; // 用于流式发送音频的分片索引
 
 // DOM Elements
 const recordBtn = document.getElementById('record-btn');
@@ -39,16 +40,133 @@ let currentStructuredData = null;
 let currentCaseId = null; // 记录当前正在查看的病例 ID
 let allCases = []; // 存储所有病例用于前端搜索
 
-// --- Recording Logic (Using Browser-side Recorder) ---
+// --- Utility Functions ---
+
+/**
+ * 适配 recorder-core 的音频处理逻辑
+ * recorder-core 的 buffers 默认是 Int16Array (PCM)
+ */
+function processAudioStream(int16Buffer, inputSampleRate) {
+    const targetSampleRate = 16000;
+    const gain = 1.2; // 稍微增加一点音量，不宜过大防止削波
+    
+    // 类型检查：确保是 Int16Array
+    if (!(int16Buffer instanceof Int16Array)) {
+        console.warn('收到非 Int16Array 数据，尝试转换...');
+        // 如果意外收到 Float32Array，进行转换
+        if (int16Buffer instanceof Float32Array) {
+            const newBuf = new Int16Array(int16Buffer.length);
+            for(let i=0; i<int16Buffer.length; i++) {
+                let s = Math.max(-1, Math.min(1, int16Buffer[i]));
+                newBuf[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            int16Buffer = newBuf;
+        } else {
+            return new Int16Array(0);
+        }
+    }
+
+    // 采样率一致的情况
+    if (inputSampleRate === targetSampleRate) {
+        if (gain === 1) return int16Buffer;
+        const result = new Int16Array(int16Buffer.length);
+        for (let i = 0; i < int16Buffer.length; i++) {
+            let s = int16Buffer[i] * gain;
+            result[i] = Math.max(-32768, Math.min(32767, s));
+        }
+        return result;
+    }
+
+    // 需要重采样 (线性插值)
+    const ratio = inputSampleRate / targetSampleRate;
+    const newLength = Math.floor(int16Buffer.length / ratio);
+    const result = new Int16Array(newLength);
+    
+    for (let i = 0; i < newLength; i++) {
+        const offset = i * ratio;
+        const leftIndex = Math.floor(offset);
+        const rightIndex = Math.min(leftIndex + 1, int16Buffer.length - 1);
+        const fraction = offset - leftIndex;
+        
+        // 插值计算
+        const interpolatedValue = int16Buffer[leftIndex] + (int16Buffer[rightIndex] - int16Buffer[leftIndex]) * fraction;
+        
+        // 应用增益并限幅
+        let s = interpolatedValue * gain;
+        result[i] = Math.max(-32768, Math.min(32767, s));
+    }
+    return result;
+}
+
+// --- Recording Logic (Using Browser-side Recorder + WebSocket Streaming) ---
 
 async function startRecording() {
-    // 检查权限并初始化
+    // 1. 初始化 WebSocket
+    const wsUrl = `${WS_BASE}/ws/stream_transcribe`;
+    console.log('正在启动流式转录服务...', wsUrl);
+    
+    try {
+        streamSocket = new WebSocket(wsUrl);
+        streamSocket.binaryType = 'arraybuffer';
+
+        streamSocket.onopen = () => {
+            console.log('WebSocket 连接成功，等待音频输入...');
+            recordStatus.innerText = "正在聆听...";
+        };
+
+        streamSocket.onmessage = (e) => {
+            try {
+                const data = JSON.parse(e.data);
+                if (data.status === 'update') {
+                    transcriptContent.innerText = data.text;
+                    transcriptContent.scrollTop = transcriptContent.scrollHeight;
+                    // 只要有文字，就允许点击结构化按钮
+                    if (data.text && data.text.length > 5) {
+                        structureBtn.disabled = false;
+                    }
+                } else if (data.status === 'complete') {
+                    transcriptContent.innerText = data.text;
+                    structureBtn.disabled = false; // 确保完成时按钮可用
+                    showToast("录音已完成，正在自动启动 AI 角色分析与结构化...");
+                    handleStructure(); // 自动进入下一阶段
+                } else if (data.status === 'error') {
+                    console.error('ASR 后端错误:', data.message);
+                    showToast("转录异常: " + data.message, "error");
+                }
+            } catch (err) {
+                console.error('解析后端消息失败:', err);
+            }
+        };
+
+        streamSocket.onerror = (err) => {
+            console.error('WebSocket 通讯故障:', err);
+            showToast("通讯链路异常，请刷新页面重试", "error");
+        };
+
+        streamSocket.onclose = () => console.log('WebSocket 链路已正常关闭');
+    } catch (err) {
+        console.error('WebSocket 初始化失败:', err);
+        showToast("无法启动实时链路", "error");
+        return;
+    }
+
+    // 2. 初始化录音引擎 (Recorder-Core)
+    lastProcessIndex = 0;
     rec = Recorder({
         type: "wav",
         sampleRate: 16000,
         bitRate: 16,
         onProcess: function(buffers, powerLevel, bufferDuration, bufferSampleRate) {
-            // 可选：在这里更新波形或音量
+            if (isRecording && streamSocket && streamSocket.readyState === WebSocket.OPEN) {
+                while (lastProcessIndex < buffers.length) {
+                    const buffer = buffers[lastProcessIndex];
+                    const pcm = processAudioStream(buffer, bufferSampleRate);
+                    if (pcm.length > 0) {
+                        streamSocket.send(pcm.buffer);
+                    }
+                    lastProcessIndex++;
+                }
+            }
         }
     });
 
@@ -57,10 +175,10 @@ async function startRecording() {
         isRecording = true;
         updateUI(true);
         startTimer();
-        transcriptContent.innerText = "正在聆听并录制...";
-        console.log('浏览器录音已启动');
+        transcriptContent.innerText = "正在初始化语音识别...";
     }, function(msg, isUserNotAllow) {
-        showToast((isUserNotAllow ? "用户拒绝了麦克风权限" : "无法开启录音：" + msg), "error");
+        showToast((isUserNotAllow ? "请授予麦克风访问权限" : "录音引擎启动失败：" + msg), "error");
+        if (streamSocket) streamSocket.close();
     });
 }
 
@@ -71,46 +189,18 @@ async function stopRecording() {
     updateUI(false);
     stopTimer();
     
-    recordStatus.innerText = "正在转录...";
-    showToast("正在处理录音文件...");
+    recordStatus.innerText = "正在完成转录...";
+    
+    // 发送停止指令
+    if (streamSocket && streamSocket.readyState === WebSocket.OPEN) {
+        streamSocket.send(JSON.stringify({ command: "stop" }));
+    }
 
-    rec.stop(async function(blob, duration) {
-        // 1. 将 Blob 转换为 Base64
-        const reader = new FileReader();
-        reader.onloadend = async function() {
-            const base64Data = reader.result.split(',')[1];
-            
-            // 2. 发送到后端转录接口
-            try {
-                const response = await fetch(`${API_BASE}/api/transcribe`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        audio_data: base64Data,
-                        format: "wav"
-                    })
-                });
-                
-                const result = await response.json();
-                if (result.status === 'success') {
-                    transcriptContent.innerText = result.data.transcript;
-                    recordStatus.innerText = "转录完成";
-                    showToast("转录成功，正在结构化分析...");
-                    handleStructure();
-                } else {
-                    showToast("转录失败: " + result.message, "error");
-                    recordStatus.innerText = "转录失败";
-                }
-            } catch (err) {
-                showToast("请求后端转录失败", "error");
-                recordStatus.innerText = "连接错误";
-            }
-        };
-        reader.readAsDataURL(blob);
-        
-        // 释放资源
+    rec.stop(function(blob, duration) {
         rec.close();
         rec = null;
+        console.log('录音停止，时长:', duration);
+        // 这里不需要再 fetch 转录接口，因为 WebSocket 会返回最终结果并触发 handleStructure
     }, function(msg) {
         showToast("录音停止失败：" + msg, "error");
     });
@@ -120,12 +210,25 @@ async function stopRecording() {
 
 async function handleStructure() {
     const transcript = transcriptContent.innerText;
-    if (!transcript || transcript.includes("等待录音")) return;
+    if (!transcript || transcript.length < 5 || transcript.includes("等待录音")) {
+        showToast("暂无有效转录内容，无法分析", "error");
+        return;
+    }
 
+    if (structureBtn.disabled && !isRecording) {
+        // 防止重复点击，但如果是自动触发则继续
+    }
+    
     structureBtn.disabled = true;
-    structureBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> 正在分析...';
+    structureBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> 正在深度分析...';
+    
+    // 给用户一点视觉反馈，知道正在处理
+    recordStatus.innerText = "AI 正在结构化处理...";
     
     try {
+        console.log("开始请求结构化分析 API...");
+        const startTime = Date.now();
+        
         const response = await fetch(`${API_BASE}/api/structure`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -133,19 +236,31 @@ async function handleStructure() {
         });
         
         const result = await response.json();
+        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`结构化分析完成，耗时: ${duration}s`);
+
         if (result.status === 'success') {
             currentStructuredData = result.data.structured_case;
             displayStructuredData(result.data.structured_case);
+            
+            // 如果有对话分析结果，也可以更新 UI（可选）
+            if (result.data.analyzed_dialogue) {
+                // 可以在这里做更多事情，比如更新对话显示
+            }
+
             exportDocxBtn.disabled = false;
             exportPdfBtn.disabled = false;
             copyDataBtn.disabled = false;
             saveCaseBtn.disabled = false;
-            showToast("病例结构化分析完成");
+            recordStatus.innerText = "分析完成";
+            showToast(`病例结构化分析完成 (耗时 ${duration}s)`);
         } else {
             showToast("分析失败: " + result.message, "error");
+            recordStatus.innerText = "分析失败";
         }
     } catch (err) {
         showToast("分析请求失败: " + err.message, "error");
+        recordStatus.innerText = "请求异常";
     } finally {
         structureBtn.innerHTML = '<i class="fas fa-magic mr-1"></i> 结构化分析';
         structureBtn.disabled = false;

@@ -406,7 +406,10 @@ async function handleExportPdf() {
 }
 
 async function handleExport(format, btn) {
-    if (!currentStructuredData) return;
+    if (!currentStructuredData) {
+        showToast("请先生成结构化病历", "error");
+        return;
+    }
 
     const originalHTML = btn.innerHTML;
     btn.disabled = true;
@@ -434,8 +437,18 @@ async function handleExport(format, btn) {
 
         const result = await response.json();
         if (result.status === 'success') {
-            showToast(`${format.toUpperCase()} 文档导出成功`);
-            console.log("File saved at:", result.data.file_path);
+            showToast(`${format.toUpperCase()} 文档导出成功，正在下载...`);
+            
+            // 触发下载
+            const downloadUrl = `${API_BASE}${result.data.download_url}`;
+            const link = document.createElement('a');
+            link.href = downloadUrl;
+            link.download = result.data.file_name;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            console.log("File downloaded from:", downloadUrl);
         } else {
             showToast("导出失败: " + result.message, "error");
         }
@@ -448,32 +461,54 @@ async function handleExport(format, btn) {
 }
 
 function handleCopy() {
-    if (!currentStructuredData) return;
+    if (!currentStructuredData) {
+        showToast("暂无病历数据可复制", "error");
+        return;
+    }
+
+    // 视觉反馈
+    const originalHTML = copyDataBtn.innerHTML;
+    copyDataBtn.innerHTML = '<i class="fas fa-check text-green-500"></i>';
+    copyDataBtn.classList.add('bg-green-50');
 
     let copyText = `患者信息：\n姓名：${patientNameInput.value || "匿名"}  年龄：${patientAgeInput.value || "未知"}  性别：${patientGenderInput.value || "未知"}\n\n`;
     
     const sections = ['主诉', '现病史', '既往史', '体格检查', '诊断', '处理意见'];
     sections.forEach(sec => {
-        if (currentStructuredData[sec]) {
-            copyText += `【${sec}】\n${currentStructuredData[sec]}\n\n`;
+        const val = currentStructuredData[sec];
+        if (val && val !== '未提取') {
+            copyText += `【${sec}】\n${val}\n\n`;
         }
     });
 
     if (currentStructuredData.ai_suggestions) {
-        copyText += `【AI 临床建议】\n${currentStructuredData.ai_suggestions}\n`;
+        copyText += `【AI 临床建议】\n${currentStructuredData.ai_suggestions}\n\n`;
+    }
+    
+    if (reportContent.value) {
+        copyText += `【完整病历报告】\n${reportContent.value}\n`;
     }
 
     navigator.clipboard.writeText(copyText).then(() => {
-        showToast("病历内容已复制到剪贴板");
+        showToast("病历内容已完整复制");
+        setTimeout(() => {
+            copyDataBtn.innerHTML = originalHTML;
+            copyDataBtn.classList.remove('bg-green-50');
+        }, 2000);
     }).catch(err => {
         console.error('复制失败:', err);
-        showToast("复制失败", "error");
+        showToast("复制失败，请手动选择复制", "error");
+        copyDataBtn.innerHTML = originalHTML;
     });
 }
 
 async function handleSaveCase() {
-    if (!currentStructuredData) return;
+    if (!currentStructuredData) {
+        showToast("暂无病历数据可保存", "error");
+        return;
+    }
 
+    const originalHTML = saveCaseBtn.innerHTML;
     saveCaseBtn.disabled = true;
     saveCaseBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> 正在保存...';
 
@@ -484,30 +519,42 @@ async function handleSaveCase() {
             gender: patientGenderInput.value || "未知"
         };
 
+        // 整合所有需要保存的数据
+        const saveData = {
+            ...currentStructuredData,
+            ...patientInfo,
+            case_id: currentCaseId,
+            markdown_content: reportContent.value,
+            ai_suggestions: suggestionsContent.innerText,
+            timestamp: new Date().toLocaleString()
+        };
+
         const response = await fetch(`${API_BASE}/api/save`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                case_data: {
-                    ...currentStructuredData,
-                    ...patientInfo,
-                    case_id: currentCaseId // 如果是编辑，会带上 ID
-                }
+                case_data: saveData
             })
         });
 
         const result = await response.json();
         if (result.status === 'success') {
             currentCaseId = result.data.case_id; // 保存返回的新 ID 或原始 ID
-            showToast("病例已保存到服务器");
+            showToast("病例已成功保存到云端");
+            saveCaseBtn.classList.remove('bg-blue-600');
+            saveCaseBtn.classList.add('bg-green-600');
+            setTimeout(() => {
+                saveCaseBtn.classList.remove('bg-green-600');
+                saveCaseBtn.classList.add('bg-blue-600');
+            }, 2000);
             loadHistory(); // 刷新侧边栏历史记录
         } else {
             showToast("保存失败: " + result.message, "error");
         }
     } catch (err) {
-        showToast("保存失败: " + err.message, "error");
+        showToast("保存异常: " + err.message, "error");
     } finally {
-        saveCaseBtn.innerHTML = '<i class="fas fa-save mr-2"></i> 保存病例';
+        saveCaseBtn.innerHTML = originalHTML;
         saveCaseBtn.disabled = false;
     }
 }
@@ -610,6 +657,8 @@ async function handleLoadCase(caseId) {
             
             // 5. 启用相关按钮
             exportDocxBtn.disabled = false;
+            exportPdfBtn.disabled = false;
+            copyDataBtn.disabled = false;
             saveCaseBtn.disabled = false;
             
             showToast("病例已加载");

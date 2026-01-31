@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import os
@@ -291,17 +291,42 @@ async def export_document(request: ExportRequest):
         else:
             file_path = doc_generator.generate_word(case_data)
             
+        file_name = os.path.basename(file_path)
         return {
             'status': 'success',
             'data': {
                 'file_path': file_path,
-                'file_name': os.path.basename(file_path),
+                'file_name': file_name,
+                'download_url': f"/api/download/{file_name}",
                 'timestamp': datetime.now().isoformat()
             }
         }
     except Exception as e:
         logger.error(f'导出失败: {str(e)}')
         raise HTTPException(status_code=500, detail=f'导出失败: {str(e)}')
+
+@app.get("/api/download/{file_name}")
+async def download_file(file_name: str):
+    try:
+        # 从配置的导出目录中查找文件
+        exports_dir = config.get("exports_dir", "./exports")
+        file_path = os.path.join(exports_dir, file_name)
+        
+        if os.path.exists(file_path):
+            return FileResponse(
+                path=file_path,
+                filename=file_name,
+                media_type='application/octet-stream'
+            )
+        else:
+            logger.error(f"文件不存在: {file_path}")
+            return JSONResponse(
+                status_code=404,
+                content={"status": "error", "message": "文件不存在"}
+            )
+    except Exception as e:
+        logger.error(f"下载文件失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/save")
 async def save_case_data(request: SaveRequest):

@@ -18,10 +18,10 @@ pip install -r requirements.txt
 
 **Windows:**
 ```bash
-python api_server.py
+python src/api_server.py
 ```
 
-服务默认将在 `http://localhost:8000` 启动，你可以访问 `http://localhost:8000/docs` 查看交互式 Swagger 文档。
+服务默认将在 `http://localhost:5000` 启动，你可以访问 `http://localhost:5000/docs` 查看交互式 Swagger 文档。
 
 ---
 
@@ -32,17 +32,42 @@ python api_server.py
 ```python
 from sdk import AIsciClient
 
-client = AIsciClient(base_url="http://localhost:8000")
+# 初始化客户端 (默认地址 http://localhost:5000)
+client = AIsciClient(base_url="http://localhost:5000")
 
-# 1. 灵犀引擎对话
-response = client.chat("请分析患者的主诉：头痛伴随恶心")
-print(response['content'])
+# 1. 检查服务状态
+health = client.health_check()
+print(health)
 
 # 2. 语音转录
-transcript = client.transcribe("path/to/audio.wav")
+# transcript_res = client.transcribe("path/to/audio.wav")
+# transcript = transcript_res['data']['transcript']
 
-# 3. 病例结构化
-case_data = client.structure_case(transcript)
+# 3. 病例结构化 (对话 -> 结构化数据)
+transcript = "医生：你好。患者：我头痛。"
+structure_res = client.structure_case(transcript)
+structured_data = structure_res['data']['structured_case']
+
+# 4. 病历报告生成
+report_res = client.generate_report(
+    structured_case=structured_data,
+    patient_info={"姓名": "张三", "年龄": "45"}
+)
+print(report_res['data']['medical_record'])
+```
+
+### 异步支持 (可选)
+SDK 内部集成了基于 `httpx` 的异步客户端：
+```python
+import asyncio
+from sdk import AsyncAIsciClient
+
+async def main():
+    client = AsyncAIsciClient()
+    res = await client.structure_case("患者主诉...")
+    print(res)
+
+asyncio.run(main())
 ```
 
 ---
@@ -51,7 +76,7 @@ case_data = client.structure_case(transcript)
 
 ### 基础信息
 
-- **Base URL**: `http://localhost:8000`
+- **Base URL**: `http://localhost:5000`
 - **Swagger UI**: `/docs`
 - **ReDoc**: `/redoc`
 

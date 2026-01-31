@@ -34,52 +34,44 @@ class CaseStructurer:
             
         return json_str
 
-    def analyze_and_structure(self, input_data):
-        """
-        合并步骤：一键完成角色分析与病历结构化
-        """
+    def analyze_and_structure(self, input_data, stream=False):
         if not input_data:
+            if stream:
+                return iter([])
             return [], {}
             
-        prompt = f"""你是一位极其专业的全科医生和医疗速记员。请根据以下原始转录文本，完成对话还原与病历结构化。
+        prompt = f"""你是一名医疗速记员。分析以下对话，提取病历信息并标注角色。
 
-【第一部分：对话还原要求】
-1. **角色标注**：识别说话人：[医生]、[患者]、[家属]。
-2. **术语修正**：修正医疗词汇错误（如“血压高”->“高血压”）。
-3. **内容提炼**：去除口癖，保持逻辑连贯。
-
-【第二部分：病历结构化要求】
-提取以下标准字段：
-- 主诉：最主要原因及持续时间。
-- 现病史：疾病发生、演变过程。
-- 既往史：健康状况、过敏史等。
-- 体格检查：提到的检查结果（血压、心率等）。
-- 诊断建议：初步诊断意见。
-- 处理意见：用药或检查计划。
+【任务】
+1. 角色标注：[医生]、[患者]、[家属]
+2. 修正医学术语
+3. 提取字段：主诉、现病史、既往史、体格检查、诊断建议、处理意见
 
 【原始转录】
 {input_data}
 
-【输出格式要求】
-必须输出标准的 JSON 对象，包含两个字段：
-1. "analyzed_dialogue": 角色对话列表，格式为 [{{"speaker": "角色", "text": "内容"}}]。
-2. "structured_case": 结构化病历对象，包含：主诉、现病史、既往史、体格检查、诊断建议、处理意见。
-
-禁止任何开场白或解释。"""
+【输出格式】
+JSON: {{"analyzed_dialogue": [{{"speaker": "角色", "text": "内容"}}], "structured_case": {{"主诉": "", "现病史": "", "既往史": "", "体格检查": "", "诊断建议": "", "处理意见": ""}}}}
+仅输出JSON，无其他内容。"""
         
         print(f"DEBUG: 正在进行一键式 AI 角色分析与病历结构化...")
-        result = self.nlp.model_pro.chat(prompt)
+        result = self.nlp.model_pro.chat(prompt, stream=stream)
         
-        if result["success"]:
-            content = result["content"]
-            try:
-                json_str = self._clean_json_content(content, is_list=False)
-                data = json.loads(json_str)
-                return data.get("analyzed_dialogue", []), data.get("structured_case", {})
-            except Exception as e:
-                print(f"DEBUG: 综合分析解析失败: {e}")
-                return [], {}
-        return [], {}
+        if stream:
+            if result["success"]:
+                return result["content"]
+            return iter([])
+        else:
+            if result["success"]:
+                content = result["content"]
+                try:
+                    json_str = self._clean_json_content(content, is_list=False)
+                    data = json.loads(json_str)
+                    return data.get("analyzed_dialogue", []), data.get("structured_case", {})
+                except Exception as e:
+                    print(f"DEBUG: 综合分析解析失败: {e}")
+                    return [], {}
+            return [], {}
 
     def analyze_dialogue(self, input_data):
         """
@@ -99,24 +91,38 @@ class CaseStructurer:
             return structured
         return {}
 
+    def generate_suggestions(self, case_data):
+        prompt = f"""根据病例提供临床建议：
+{json.dumps(case_data, ensure_ascii=False, indent=2)}
+
+要求：
+1. 进一步检查建议
+2. 用药注意事项  
+3. 生活方式建议
+4. Markdown列表格式
+直接输出，无开场白。"""
+        
+        print("DEBUG: 正在生成 AI 临床建议...")
+        result = self.nlp.model_pro.chat(prompt)
+        if result["success"]:
+            return result["content"].strip()
+        else:
+            print(f"DEBUG: 建议生成失败: {result.get('error', '未知错误')}")
+            return ""
+
     def generate_report(self, case_data, config):
-        """
-        根据病例数据生成正式的医疗报告/病历文书
-        """
         hospital = config.get("hospital_name", "XX医院")
         doctor = config.get("doctor_name", "王医生")
         
-        prompt = f"""你是一位资深的医疗病历书写专家。请根据以下提取的病例数据，生成一份正式、规范、专业的入院/门诊记录。
-【医院名称】：{hospital}
-【医生姓名】：{doctor}
-【病例数据】：
+        prompt = f"""生成病历报告：
+医院：{hospital}，医生：{doctor}
 {json.dumps(case_data, ensure_ascii=False, indent=2)}
 
-【要求】：
-1. 语言要医学化、专业化。
-2. 包含医院名称、基本信息、主诉、现病史、既往史、查体、诊断、处理意见等标准板块。
-3. 排版工整，直接输出正文内容。
-4. 使用 Markdown 格式。"""
+要求：
+1. 医学专业语言
+2. 包含：基本信息、主诉、现病史、既往史、查体、诊断、处理意见
+3. Markdown格式
+直接输出，无开场白。"""
         
         print("DEBUG: 正在生成正式报告...")
         result = self.nlp.model_pro.chat(prompt)

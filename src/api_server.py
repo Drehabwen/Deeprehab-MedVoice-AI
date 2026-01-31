@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import os
@@ -182,17 +182,74 @@ async def structure_case(request: StructureRequest):
         # 使用合并后的方法，大幅提升速度
         analyzed_dialogue, structured_case = case_structurer.analyze_and_structure(request.transcript)
         
+        # 生成 AI 临床建议
+        ai_suggestions = case_structurer.generate_suggestions(structured_case)
+        
+        # 生成完整病历报告
+        markdown_content = case_structurer.generate_report(structured_case, config)
+        
         return {
             'status': 'success',
             'data': {
                 'analyzed_dialogue': analyzed_dialogue,
                 'structured_case': structured_case,
+                'ai_suggestions': ai_suggestions,
+                'markdown_content': markdown_content,
                 'timestamp': datetime.now().isoformat()
             }
         }
     except Exception as e:
         logger.error(f'病例结构化失败: {str(e)}')
         raise HTTPException(status_code=500, detail=f'病例结构化失败: {str(e)}')
+
+@app.post("/api/structure/stream")
+async def structure_case_stream(request: StructureRequest):
+    """
+    流式结构化分析，使用 SSE (Server-Sent Events) 实现实时推送
+    """
+    async def generate():
+        try:
+            # 阶段 1: 结构化分析（流式）
+            logger.info('开始流式结构化分析...')
+            yield f"data: {json.dumps({'stage': 'analyzing', 'message': '正在进行AI结构化分析...'}, ensure_ascii=False)}\n\n"
+            
+            # 获取流式响应
+            stream = case_structurer.analyze_and_structure(request.transcript, stream=True)
+            
+            full_content = ""
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_content += content
+                    
+            # 解析结果
+            json_str = case_structurer._clean_json_content(full_content, is_list=False)
+            data = json.loads(json_str)
+            analyzed_dialogue = data.get("analyzed_dialogue", [])
+            structured_case = data.get("structured_case", {})
+            
+            # 发送结构化结果
+            yield f"data: {json.dumps({'stage': 'analyzed', 'analyzed_dialogue': analyzed_dialogue, 'structured_case': structured_case}, ensure_ascii=False)}\n\n"
+            
+            # 阶段 2: 生成 AI 建议
+            logger.info('开始生成 AI 临床建议...')
+            yield f"data: {json.dumps({'stage': 'suggesting', 'message': '正在生成 AI 临床建议...'}, ensure_ascii=False)}\n\n"
+            
+            ai_suggestions = case_structurer.generate_suggestions(structured_case)
+            yield f"data: {json.dumps({'stage': 'suggested', 'ai_suggestions': ai_suggestions}, ensure_ascii=False)}\n\n"
+            
+            # 阶段 3: 生成报告
+            logger.info('开始生成最终报告...')
+            yield f"data: {json.dumps({'stage': 'reporting', 'message': '正在生成最终病历报告...'}, ensure_ascii=False)}\n\n"
+            
+            markdown_content = case_structurer.generate_report(structured_case, config)
+            yield f"data: {json.dumps({'stage': 'completed', 'markdown_content': markdown_content, 'timestamp': datetime.now().isoformat()}, ensure_ascii=False)}\n\n"
+            
+        except Exception as e:
+            logger.error(f'流式结构化失败: {str(e)}')
+            yield f"data: {json.dumps({'stage': 'error', 'error': str(e)}, ensure_ascii=False)}\n\n"
+    
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 @app.post("/api/generate")
 async def generate_medical_record(request: GenerateRequest):

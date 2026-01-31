@@ -12,27 +12,19 @@ class GenericOpenAILLM:
         self.temperature = temperature
         self.max_tokens = max_tokens
         
-    def chat(self, query, stream=False):
+    def chat(self, query):
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": query}],
                 temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                stream=stream
+                max_tokens=self.max_tokens
             )
-            if stream:
-                return {
-                    "content": response,
-                    "success": True,
-                    "error": None
-                }
-            else:
-                return {
-                    "content": response.choices[0].message.content,
-                    "success": True,
-                    "error": None
-                }
+            return {
+                "content": response.choices[0].message.content,
+                "success": True,
+                "error": None
+            }
         except Exception as e:
             return {
                 "content": "",

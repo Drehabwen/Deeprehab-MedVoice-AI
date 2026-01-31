@@ -226,38 +226,92 @@ async function handleStructure() {
     recordStatus.innerText = "AI 正在结构化处理...";
     
     try {
-        console.log("开始请求结构化分析 API...");
+        console.log("开始请求流式结构化分析 API...");
         const startTime = Date.now();
         
-        const response = await fetch(`${API_BASE}/api/structure`, {
+        const response = await fetch(`${API_BASE}/api/structure/stream`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ transcript })
         });
         
-        const result = await response.json();
-        const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-        console.log(`结构化分析完成，耗时: ${duration}s`);
-
-        if (result.status === 'success') {
-            currentStructuredData = result.data.structured_case;
-            displayStructuredData(result.data.structured_case);
-            
-            // 如果有对话分析结果，也可以更新 UI（可选）
-            if (result.data.analyzed_dialogue) {
-                // 可以在这里做更多事情，比如更新对话显示
-            }
-
-            exportDocxBtn.disabled = false;
-            exportPdfBtn.disabled = false;
-            copyDataBtn.disabled = false;
-            saveCaseBtn.disabled = false;
-            recordStatus.innerText = "分析完成";
-            showToast(`病例结构化分析完成 (耗时 ${duration}s)`);
-        } else {
-            showToast("分析失败: " + result.message, "error");
-            recordStatus.innerText = "分析失败";
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
+        
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        
+        let buffer = '';
+        let currentStructuredData = null;
+        
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            buffer += decoder.decode(value, { stream: true });
+            
+            // 处理 SSE 事件
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop() || '';
+            
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    try {
+                        const data = JSON.parse(line.substring(6));
+                        
+                        switch (data.stage) {
+                            case 'analyzing':
+                                recordStatus.innerText = data.message || "AI 正在结构化分析...";
+                                break;
+                                
+                            case 'analyzed':
+                                currentStructuredData = data.structured_case;
+                                displayStructuredData(data.structured_case);
+                                recordStatus.innerText = "结构化分析完成，正在生成建议...";
+                                break;
+                                
+                            case 'suggesting':
+                                recordStatus.innerText = data.message || "正在生成 AI 临床建议...";
+                                break;
+                                
+                            case 'suggested':
+                                // 更新建议内容
+                                suggestionsContent.innerText = data.ai_suggestions || "暂无建议";
+                                recordStatus.innerText = "建议生成完成，正在生成报告...";
+                                break;
+                                
+                            case 'reporting':
+                                recordStatus.innerText = data.message || "正在生成最终病历报告...";
+                                break;
+                                
+                            case 'completed':
+                                const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+                                console.log(`流式结构化分析完成，耗时: ${duration}s`);
+                                
+                                // 更新最终报告
+                                if (data.markdown_content) {
+                                    reportContent.value = data.markdown_content;
+                                }
+                                
+                                exportDocxBtn.disabled = false;
+                                exportPdfBtn.disabled = false;
+                                copyDataBtn.disabled = false;
+                                saveCaseBtn.disabled = false;
+                                recordStatus.innerText = "分析完成";
+                                showToast(`病例结构化分析完成 (耗时 ${duration}s)`);
+                                break;
+                                
+                            case 'error':
+                                throw new Error(data.error || '未知错误');
+                        }
+                    } catch (e) {
+                        console.error('解析 SSE 数据失败:', e, line);
+                    }
+                }
+            }
+        }
+        
     } catch (err) {
         showToast("分析请求失败: " + err.message, "error");
         recordStatus.innerText = "请求异常";

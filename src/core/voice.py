@@ -191,14 +191,13 @@ class VoiceRecognizer:
                 stream = p.open(format=pyaudio.paInt16, channels=1, rate=sample_rate, input=True, frames_per_buffer=1024)
             
             business_params = {
-                "language": "zh_cn", # 强制中文
+                "language": "zh_cn", 
                 "domain": "iat",
                 "accent": "mandarin",
                 "vad_eos": 3000, 
                 "nunum": 1,
-                "speex_size": 70, # 略微调高
-                "pd": "medical", 
-                "wnd": "1" # 尝试开启中文优先
+                "speex_size": 70, 
+                "pd": "medical"
             }
             if self.config.get("enable_diarization", False):
                 business_params["role_type"] = 2

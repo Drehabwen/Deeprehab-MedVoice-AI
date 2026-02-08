@@ -7,6 +7,7 @@ import websocket
 import ssl
 import queue
 import time
+import email.utils
 from datetime import datetime
 from urllib.parse import urlencode, urlparse
 
@@ -47,10 +48,13 @@ class VoiceRecognizer:
 
     def generate_auth_url(self, date=None):
         if date is None:
-            date = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())
+            # 强制使用英文格式的 GMT 时间，避免本地语言干扰
+            date = email.utils.formatdate(timeval=None, localtime=False, usegmt=True)
         
         host = urlparse(self.URL).netloc
         path = urlparse(self.URL).path
+        
+        # 严格按照讯飞官方格式拼接签名原始字符串
         signature_origin = f"host: {host}\ndate: {date}\nGET {path} HTTP/1.1"
         
         signature_sha = hmac.new(self.API_SECRET.encode('utf-8'), 
@@ -58,6 +62,7 @@ class VoiceRecognizer:
                                 digestmod=hashlib.sha256).digest()
         signature = base64.b64encode(signature_sha).decode('utf-8')
         
+        # Authorization 字符串：逗号后保留空格，符合官方标准
         auth_str = f'api_key="{self.API_KEY}", algorithm="hmac-sha256", headers="host date request-line", signature="{signature}"'
         authorization = base64.b64encode(auth_str.encode('utf-8')).decode('utf-8')
         
@@ -102,11 +107,16 @@ class VoiceRecognizer:
         self.session_count += 1
         current_session = self.session_count
         
-        date = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())
+        # 统一使用 email.utils 获取时间，确保格式一致
+        date = email.utils.formatdate(timeval=None, localtime=False, usegmt=True)
         auth_url = self.generate_auth_url(date=date)
         
-        headers = {"Date": date}
-        # print(f"DEBUG: Connecting to ASR with AppID={self.APPID}")
+        # 提取 host 用于握手头
+        host = urlparse(self.URL).netloc
+        headers = {
+            "Host": host,
+            "Date": date
+        }
         
         self.ws = websocket.WebSocketApp(auth_url,
                                        header=headers,
@@ -281,8 +291,8 @@ if __name__ == "__main__":
     r.stop()
 
 class VoiceRecorder:
-    def __init__(self):
-        self.recognizer = VoiceRecognizer()
+    def __init__(self, config=None):
+        self.recognizer = VoiceRecognizer(config)
         self.is_recording = False
         self.last_result = ""
         self.error = None
@@ -331,15 +341,15 @@ class VoiceRecorder:
         import wave
         import base64
         import os
+        import threading
+        import time
         
         try:
-            # 前端现在发送的是标准的 16k 16bit 单声道 WAV
-            # 直接使用 wave 模块读取
+            # 读取音频文件
             try:
                 wf = wave.open(audio_file_path, 'rb')
             except Exception as e:
-                # 保底方案：如果还是报错，尝试修复头部
-                print(f"标准读取失败，尝试修复 WAV 头部: {e}")
+                # 保底方案：尝试修复 WAV 头部
                 with open(audio_file_path, 'rb') as f:
                     content = f.read()
                     riff_pos = content.find(b'RIFF')
@@ -352,17 +362,12 @@ class VoiceRecorder:
                     else:
                         raise e
 
-            sample_rate = wf.getframerate()
-            frames = wf.getnframes()
-            audio_data = wf.readframes(frames)
+            audio_data = wf.readframes(wf.getnframes())
             wf.close()
             
-            # 如果是修复过的临时文件，读取完就删掉
             if audio_file_path.endswith(".fixed.wav") and os.path.exists(audio_file_path):
-                try:
-                    os.remove(audio_file_path)
-                except:
-                    pass
+                try: os.remove(audio_file_path)
+                except: pass
             
             transcript_container = {"text": ""}
             complete_event = threading.Event()
@@ -376,66 +381,35 @@ class VoiceRecorder:
                 error_container["error"] = error
                 complete_event.set()
             
-            self.recognizer.start(on_complete=on_complete, on_error=on_error)
+            # 使用识别器推送模式，禁用本地 PyAudio
+            self.recognizer.start(on_complete=on_complete, on_error=on_error, use_pyaudio=False)
             
-            # 等待 WebSocket 连接就绪
-            import time
-            max_wait = 30
+            # 等待连接建立
+            max_wait = 50
             while not (self.recognizer.ws and self.recognizer.ws.sock and self.recognizer.ws.sock.connected) and max_wait > 0:
                 time.sleep(0.1)
                 max_wait -= 1
             
-            ws = self.recognizer.ws
-            if ws and ws.sock and ws.sock.connected:
-                params = {
-                    "common": {"app_id": self.recognizer.APPID},
-                    "business": {
-                        "language": "zh_cn",
-                        "domain": "iat",
-                        "accent": "mandarin",
-                        "vad_eos": 5000,
-                        "nunum": 1,
-                        "speex_size": 60
-                    },
-                    "data": {"status": 0, "format": "audio/L16;rate=16000", "encoding": "raw", "audio": ""}
-                }
-                ws.send(json.dumps(params))
-                
-                chunk_size = 1024
-                status = 1
-                total_chunks = len(audio_data) // chunk_size
-                
-                for i in range(total_chunks):
-                    if not ws.sock or not ws.sock.connected:
-                        break
-                    
-                    chunk = audio_data[i * chunk_size:(i + 1) * chunk_size]
-                    frame = {
-                        "data": {
-                            "status": status,
-                            "format": "audio/L16;rate=16000",
-                            "audio": base64.b64encode(chunk).decode('utf-8'),
-                            "encoding": "raw"
-                        }
-                    }
-                    ws.send(json.dumps(frame))
-                    status = 1
-                    
-                    import time
-                    time.sleep(0.01)
-                
-                if ws.sock and ws.sock.connected:
-                    end_frame = {"data": {"status": 2, "format": "audio/L16;rate=16000", "audio": "", "encoding": "raw"}}
-                    ws.send(json.dumps(end_frame))
-                
-                complete_event.wait(timeout=30)
-                
+            if not (self.recognizer.ws and self.recognizer.ws.sock and self.recognizer.ws.sock.connected):
+                self.recognizer.stop()
+                raise Exception("无法建立 ASR WebSocket 连接")
+
+            # 分片推送音频
+            chunk_size = 1280 # 讯飞推荐的分片大小
+            for i in range(0, len(audio_data), chunk_size):
+                if error_container["error"]: break
+                chunk = audio_data[i:i + chunk_size]
+                self.recognizer.push_audio(chunk)
+                time.sleep(0.04) # 模拟实时流速
+            
+            # 停止识别并等待结果
+            self.recognizer.stop()
+            if complete_event.wait(timeout=30):
                 if error_container["error"]:
                     raise Exception(error_container["error"])
-                
                 return transcript_container["text"]
             else:
-                raise Exception("WebSocket连接失败")
+                raise Exception("转录超时")
             
         except Exception as e:
             print(f"文件转录失败: {str(e)}")

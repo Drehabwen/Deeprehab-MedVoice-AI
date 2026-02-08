@@ -47,12 +47,25 @@ logger = logging.getLogger(__name__)
 
 # 加载配置
 def load_config():
-    config_path = "config.json"
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    else:
-        return {
+    # 尝试多个可能的配置文件路径
+    config_paths = [
+        "config.json",
+        "../config/config.json",
+        "config/config.json",
+        "../config.json"
+    ]
+    
+    for path in config_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    logger.info(f"成功加载配置文件: {path}")
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"读取配置文件 {path} 失败: {e}")
+    
+    logger.warning("未找到配置文件，将使用默认配置")
+    return {
             "hospital_name": "XX社区卫生服务中心",
             "doctor_name": "王医生",
             "audio_sample_rate": 16000,
@@ -64,7 +77,7 @@ def load_config():
 config = load_config()
 
 # 初始化组件
-recorder = VoiceRecorder()
+recorder = VoiceRecorder(config)
 nlp_processor = NLPProcessor(config)
 case_structurer = CaseStructurer(nlp_processor)
 doc_generator = DocumentGenerator(config)
